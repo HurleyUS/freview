@@ -114,6 +114,135 @@ append_section() {
   return "$section_status"
 }
 
+observability_gate() {
+  local gate_root="$root"
+
+  python3 - "$gate_root" <<'PYOBS'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+package_path = root / "package.json"
+vercel_path = root / ".vercel" / "project.json"
+
+if not package_path.exists() or not vercel_path.exists():
+    sys.exit(0)
+
+try:
+    package = json.loads(package_path.read_text())
+except Exception as exc:
+    print(f"FAIL: package.json is unreadable: {exc}")
+    sys.exit(1)
+
+deps = {}
+for key in ("dependencies", "devDependencies", "optionalDependencies"):
+    value = package.get(key)
+    if isinstance(value, dict):
+        deps.update(value)
+
+if "next" not in deps:
+    sys.exit(0)
+
+skip_dirs = {".git", ".next", ".vercel", "node_modules", "dist", "build", "coverage", ".turbo"}
+suffixes = {".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cjs", ".json"}
+texts = []
+for path in root.rglob("*"):
+    if any(part in skip_dirs for part in path.parts):
+        continue
+    if not path.is_file() or path.suffix not in suffixes:
+        continue
+    try:
+        texts.append((str(path.relative_to(root)), path.read_text(errors="ignore")))
+    except Exception:
+        pass
+
+blob = "\n".join(text for _, text in texts)
+failures = []
+
+def has_file(name):
+    return any(rel == name or rel.endswith("/" + name) for rel, _ in texts)
+
+if "@sentry/nextjs" not in deps:
+    failures.append("missing @sentry/nextjs dependency")
+if "posthog-js" not in deps:
+    failures.append("missing posthog-js dependency")
+if "withSentryConfig" not in blob:
+    failures.append("missing Sentry Next.js wrapper: withSentryConfig in next.config.*")
+if not (has_file("instrumentation.ts") or has_file("instrumentation.js") or has_file("sentry.server.config.ts") or has_file("sentry.server.config.js")):
+    failures.append("missing server-side Sentry instrumentation")
+if not (has_file("instrumentation-client.ts") or has_file("instrumentation-client.js") or has_file("sentry.client.config.ts") or has_file("sentry.client.config.js")):
+    failures.append("missing client-side Sentry instrumentation")
+if "posthog.init" not in blob:
+    failures.append("missing PostHog browser initialization: posthog.init")
+if not ("PostHogProvider" in blob or "posthog-js/react" in blob):
+    failures.append("missing PostHog React provider")
+if "NEXT_PUBLIC_POSTHOG_KEY" not in blob:
+    failures.append("missing NEXT_PUBLIC_POSTHOG_KEY usage")
+if "NEXT_PUBLIC_POSTHOG_HOST" not in blob:
+    failures.append("missing NEXT_PUBLIC_POSTHOG_HOST usage")
+
+if failures:
+    print("FAIL: observability coverage gate failed")
+    for failure in failures:
+        print(f"- {failure}")
+    sys.exit(1)
+
+print("PASS: static Sentry/PostHog coverage checks")
+PYOBS
+  local static_status=$?
+  (( static_status != 0 )) && return "$static_status"
+
+  [[ ! -f "$gate_root/.vercel/project.json" ]] && return 0
+
+  if ! command -v vercel >/dev/null 2>&1; then
+    printf "FAIL: vercel CLI is required to confirm production env vars\n"
+    return 1
+  fi
+
+  local env_output env_status
+  if [[ -n "${VERCEL_TOKEN:-}" ]]; then
+    env_output="$(cd "$gate_root" && vercel env ls production --token "$VERCEL_TOKEN" 2>&1)"
+    env_status=$?
+  else
+    env_output="$(cd "$gate_root" && vercel env ls production 2>&1)"
+    env_status=$?
+  fi
+
+  if (( env_status != 0 )); then
+    printf "FAIL: unable to read Vercel production env vars\n"
+    printf "%s\n" "$env_output" | sed -E 's/(vcp_)[A-Za-z0-9]+/\1***/g'
+    return 1
+  fi
+
+  printf "%s\n" "$env_output" | python3 -c '
+import sys
+names = set()
+for line in sys.stdin.read().splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith(("Vercel CLI", "Retrieving", ">", "name ")):
+        continue
+    first = stripped.split()[0]
+    if first.isidentifier() or first.startswith("NEXT_PUBLIC_"):
+        names.add(first)
+required = [
+    ("Sentry DSN", ("NEXT_PUBLIC_SENTRY_DSN", "SENTRY_DSN")),
+    ("SENTRY_AUTH_TOKEN", ("SENTRY_AUTH_TOKEN",)),
+    ("SENTRY_ORG", ("SENTRY_ORG",)),
+    ("SENTRY_PROJECT", ("SENTRY_PROJECT",)),
+    ("NEXT_PUBLIC_POSTHOG_KEY", ("NEXT_PUBLIC_POSTHOG_KEY",)),
+    ("NEXT_PUBLIC_POSTHOG_HOST", ("NEXT_PUBLIC_POSTHOG_HOST",)),
+]
+missing = [label for label, options in required if not any(option in names for option in options)]
+if missing:
+    print("FAIL: Vercel production env vars missing")
+    for item in missing:
+        print(f"- {item}")
+    sys.exit(1)
+print("PASS: Vercel production env vars confirmed for Sentry/PostHog")
+'
+}
+
 overall_status=0
 
 (
@@ -124,6 +253,7 @@ overall_status=0
 
 printf "# FALLOW REVIEW\n" > "$report_tmp"
 
+append_section "OBSERVABILITY" observability_gate || overall_status=1
 append_section "HEALTH" bunx --bun fallow "${fallow_args[@]}" health --complexity || overall_status=1
 append_section "AUDIT" bunx --bun fallow "${fallow_args[@]}" audit || overall_status=1
 append_section "DEAD" bunx --bun fallow "${fallow_args[@]}" dead-code || overall_status=1
@@ -145,6 +275,7 @@ if (( overall_status != 0 )); then
     (( explain )) && human_fallow_args+=("--explain") && human_scribe_args+=("--explain")
     (( summary )) && human_fallow_args+=("--summary") && human_scribe_args+=("--summary")
 
+    append_section "OBSERVABILITY" observability_gate
     append_section "HEALTH" bunx --bun fallow "${human_fallow_args[@]}" health --complexity
     append_section "AUDIT" bunx --bun fallow "${human_fallow_args[@]}" audit
     append_section "DEAD" bunx --bun fallow "${human_fallow_args[@]}" dead-code
