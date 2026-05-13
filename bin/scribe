@@ -1,0 +1,555 @@
+#!/usr/bin/env zsh
+## Scribe public module surface.
+
+set -u
+
+threshold=100
+fix=0
+quiet=0
+explain=0
+summary=0
+format="human"
+sarif_file=""
+roots=()
+exclude_patterns=()
+
+usage() {
+  cat <<'HELP'
+Usage: scribe [--fix] [--quiet] [--explain] [--summary] [--format FORMAT] [--root ROOT] [--exclude GLOB] [path ...]
+
+Audits public-symbol documentation coverage across common project languages.
+
+Covered languages:
+  TypeScript/JavaScript, Swift, Rust, C/C headers, PHP, Python, Bash/Zsh
+
+Coverage rule:
+  A symbol is documented when it has a nearby doc comment, or when its module has
+  a top-of-file doc block. --fix inserts module doc blocks for files with public
+  symbols and no module docs.
+
+Formats:
+  human, json, sarif, compact, markdown, codeclimate, badge
+
+Fallow-compatible aliases:
+  -r/--root, -f/--format, --output, --ci, --fail-on-issues, --sarif-file
+
+Scope:
+  scribe obeys .gitignore by default, reads ignorePatterns from .fallowrc.json
+  or fallowrc.json, and accepts repeatable --exclude glob patterns.
+HELP
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --fix)
+      fix=1
+      shift
+      ;;
+    --threshold)
+      threshold="${2:-100}"
+      shift 2
+      ;;
+    -r|--root)
+      roots+=("${2:-.}")
+      shift 2
+      ;;
+    --quiet)
+      quiet=1
+      shift
+      ;;
+    --explain)
+      explain=1
+      shift
+      ;;
+    --summary)
+      summary=1
+      shift
+      ;;
+    --exclude)
+      exclude_patterns+=("${2:-}")
+      shift 2
+      ;;
+    --exclude=*)
+      exclude_patterns+=("${1#*=}")
+      shift
+      ;;
+    --format|-f|--output)
+      format="${2:-human}"
+      shift 2
+      ;;
+    --format=*|--output=*)
+      format="${1#*=}"
+      shift
+      ;;
+    --ci)
+      format="sarif"
+      quiet=1
+      threshold=100
+      shift
+      ;;
+    --fail-on-issues)
+      threshold=100
+      shift
+      ;;
+    --sarif-file)
+      sarif_file="${2:-}"
+      shift 2
+      ;;
+    --sarif-file=*)
+      sarif_file="${1#*=}"
+      shift
+      ;;
+    -V|--version)
+      printf "scribe 1.0.0\n"
+      exit 0
+      ;;
+    -h|--help|--usage)
+      usage
+      exit 0
+      ;;
+    *)
+      roots+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if (( ${#roots[@]} == 0 )); then
+  roots=(".")
+fi
+
+tmp_report="$(mktemp)"
+trap 'rm -f "$tmp_report"' EXIT
+
+normalize_path() {
+  local file="$1"
+  file="${file#./}"
+  file="${file:A}"
+
+  local cwd="${PWD:A}"
+  if [[ "$file" == "$cwd"/* ]]; then
+    file="${file#$cwd/}"
+  fi
+
+  print -r -- "$file"
+}
+
+add_fallow_excludes_for_root() {
+  local root="$1"
+  local config=""
+
+  if [[ -f "$root/.fallowrc.json" ]]; then
+    config="$root/.fallowrc.json"
+  elif [[ -f "$root/fallowrc.json" ]]; then
+    config="$root/fallowrc.json"
+  fi
+
+  [[ -n "$config" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] && exclude_patterns+=("$pattern")
+  done < <(
+    jq -r '
+      [
+        (.ignorePatterns // []),
+        (.exclude // []),
+        (.excludes // [])
+      ]
+      | flatten
+      | .[]
+    ' "$config" 2>/dev/null
+  )
+}
+
+for root in "${roots[@]}"; do
+  add_fallow_excludes_for_root "$root"
+done
+
+json_escape() {
+  awk '
+    BEGIN {
+      s = ARGV[1]
+      ARGV[1] = ""
+      gsub(/\\/, "\\\\", s)
+      gsub(/"/, "\\\"", s)
+      gsub(/\t/, "\\t", s)
+      gsub(/\r/, "\\r", s)
+      gsub(/\n/, "\\n", s)
+      printf "%s", s
+    }
+  ' "$1"
+}
+
+is_source_file() {
+  case "$1" in
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.swift|*.rs|*.c|*.h|*.hpp|*.php|*.py|*.sh|*.bash|*.zsh)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_ignored_file() {
+  case "$1" in
+    *.test.*|*.spec.*|*.d.ts)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+matches_glob_pattern() {
+  local file="$1"
+  local pattern="$2"
+  local normalized
+  normalized="$(normalize_path "$file")"
+  pattern="${pattern#./}"
+
+  [[ -n "$pattern" ]] || return 1
+
+  if [[ "$pattern" == */** ]]; then
+    local prefix="${pattern%/**}"
+    [[ "$normalized" == "$prefix" || "$normalized" == "$prefix"/* ]] && return 0
+  fi
+
+  [[ "$normalized" == ${~pattern} ]] && return 0
+  [[ "./$normalized" == ${~pattern} ]] && return 0
+  return 1
+}
+
+is_excluded_by_pattern() {
+  local file="$1"
+  local pattern
+
+  for pattern in "${exclude_patterns[@]}"; do
+    matches_glob_pattern "$file" "$pattern" && return 0
+  done
+
+  return 1
+}
+
+is_gitignored_file() {
+  local file="$1"
+
+  command -v git >/dev/null 2>&1 || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  git check-ignore -q -- "$file" 2>/dev/null
+}
+
+is_out_of_scope_file() {
+  local file="$1"
+
+  is_ignored_file "$file" && return 0
+  is_gitignored_file "$file" && return 0
+  is_excluded_by_pattern "$file" && return 0
+  return 1
+}
+
+comment_block_for() {
+  local file="$1"
+  case "$file" in
+    *.py)
+      printf '"""\n%s public module surface.\n"""\n' "$(title_for "$file")"
+      ;;
+    *.sh|*.bash|*.zsh)
+      printf '## %s public module surface.\n' "$(title_for "$file")"
+      ;;
+    *)
+      printf '/**\n * %s public module surface.\n */\n' "$(title_for "$file")"
+      ;;
+  esac
+}
+
+title_for() {
+  local file="$1"
+  local base="${file%.*}"
+  print -r -- "$base" | awk '
+    {
+      gsub(/^\.\//, "")
+      gsub(/[\/_-]+/, " ")
+      for (i = 1; i <= NF; i++) {
+        $i = toupper(substr($i, 1, 1)) substr($i, 2)
+      }
+      print
+    }
+  '
+}
+
+has_public_symbol() {
+  local file="$1"
+  awk -v file="$file" '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function symbol_line(line) {
+      line = trim(line)
+      if (file ~ /\.(ts|tsx|js|jsx|mjs|cjs)$/) return line ~ /^export[ \t]+/
+      if (file ~ /\.swift$/) return line ~ /^(public|open)[ \t]+(final[ \t]+)?(func|class|struct|enum|protocol|actor|var|let)[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.rs$/) return line ~ /^pub(\([^)]*\))?[ \t]+(async[ \t]+)?(fn|struct|enum|trait|const|static|type|mod)[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.php$/) return line ~ /^public[ \t]+function[ \t]+[A-Za-z_][A-Za-z0-9_]*/ || line ~ /^(final[ \t]+|abstract[ \t]+)?class[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.py$/) return line ~ /^(def|class)[ \t]+[A-Za-z][A-Za-z0-9_]*[ \t]*[\(:]/
+      if (file ~ /\.(sh|bash|zsh)$/) return line ~ /^(function[ \t]+)?[A-Za-z][A-Za-z0-9_]*[ \t]*\(\)[ \t]*(\{|$)/
+      if (file ~ /\.(c|h|hpp)$/) return line ~ /^[A-Za-z_][A-Za-z0-9_ \t\*]+[ \t]+[A-Za-z][A-Za-z0-9_]*[ \t]*\([^;]*\)[ \t]*\{?$/ && line !~ /^(if|for|while|switch)[ \t]*\(/ && line !~ /^static[ \t]/
+      return 0
+    }
+    symbol_line($0) { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$file"
+}
+
+has_module_doc() {
+  local file="$1"
+  awk '
+    BEGIN { seen_shebang = 0 }
+    NR == 1 && /^#!/ { next }
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*(\/\*\*|\/\/\/|\/\/!|##|#|""")/ { exit 0 }
+    index($0, sprintf("%c%c%c", 39, 39, 39)) == 1 { exit 0 }
+    { exit 1 }
+  ' "$file"
+}
+
+insert_module_doc() {
+  local file="$1"
+  local doc
+  doc="$(comment_block_for "$file")"
+  local tmp
+  tmp="$(mktemp)"
+
+  if head -n 1 "$file" | grep -q '^#!'; then
+    head -n 1 "$file" > "$tmp"
+    printf '%s\n' "$doc" >> "$tmp"
+    tail -n +2 "$file" >> "$tmp"
+  else
+    printf '%s\n' "$doc" > "$tmp"
+    cat "$file" >> "$tmp"
+  fi
+
+  mv "$tmp" "$file"
+}
+
+find_files() {
+  find "$@" \
+    \( -path '*/.git' -o -path '*/.claude' -o -path '*/node_modules' -o -path '*/.next' -o -path '*/coverage' -o -path '*/dist' -o -path '*/build' -o -path '*/target' -o -path '*/vendor' \) -prune \
+    -o -type f -print
+}
+
+if (( fix )); then
+  while IFS= read -r file; do
+    is_source_file "$file" || continue
+    is_out_of_scope_file "$file" && continue
+    has_public_symbol "$file" || continue
+    has_module_doc "$file" && continue
+    insert_module_doc "$file"
+  done < <(find_files "${roots[@]}")
+fi
+
+total=0
+documented=0
+
+while IFS= read -r file; do
+  is_source_file "$file" || continue
+  is_out_of_scope_file "$file" && continue
+
+  awk -v file="$file" '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function name_from(line,    original) {
+      line = trim(line)
+      original = line
+      sub(/^.*function[ \t]+/, "", line); if (line != original) { sub(/[^A-Za-z0-9_$].*$/, "", line); return line }
+      line = original; sub(/^.*(class|interface|type|enum|const|let|var)[ \t]+/, "", line); if (line != original) { sub(/[^A-Za-z0-9_$].*$/, "", line); return line }
+      line = original; sub(/^.*(func|struct|protocol|actor)[ \t]+/, "", line); if (line != original) { sub(/[^A-Za-z0-9_].*$/, "", line); return line }
+      line = original; sub(/^.*(fn|struct|trait|mod)[ \t]+/, "", line); if (line != original) { sub(/[^A-Za-z0-9_].*$/, "", line); return line }
+      line = original; sub(/^(def|class)[ \t]+/, "", line); if (line != original) { sub(/[^A-Za-z0-9_].*$/, "", line); return line }
+      line = original; sub(/^function[ \t]+/, "", line); sub(/[ \t]*\(\).*$/, "", line); if (line ~ /^[A-Za-z][A-Za-z0-9_]*$/) return line
+      return "symbol"
+    }
+    function is_doc(line) {
+      return line ~ /^[ \t]*(\/\*\*|\/\/\/|\/\/!|##|#|"""|\*)/ || index(line, sprintf("%c%c%c", 39, 39, 39)) == 1
+    }
+    function is_symbol(line) {
+      line = trim(line)
+      if (file ~ /\.(ts|tsx|js|jsx|mjs|cjs)$/) return line ~ /^export[ \t]+/
+      if (file ~ /\.swift$/) return line ~ /^(public|open)[ \t]+(final[ \t]+)?(func|class|struct|enum|protocol|actor|var|let)[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.rs$/) return line ~ /^pub(\([^)]*\))?[ \t]+(async[ \t]+)?(fn|struct|enum|trait|const|static|type|mod)[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.php$/) return line ~ /^public[ \t]+function[ \t]+[A-Za-z_][A-Za-z0-9_]*/ || line ~ /^(final[ \t]+|abstract[ \t]+)?class[ \t]+[A-Za-z_][A-Za-z0-9_]*/
+      if (file ~ /\.py$/) return line ~ /^(def|class)[ \t]+[A-Za-z][A-Za-z0-9_]*[ \t]*[\(:]/
+      if (file ~ /\.(sh|bash|zsh)$/) return line ~ /^(function[ \t]+)?[A-Za-z][A-Za-z0-9_]*[ \t]*\(\)[ \t]*(\{|$)/
+      if (file ~ /\.(c|h|hpp)$/) return line ~ /^[A-Za-z_][A-Za-z0-9_ \t\*]+[ \t]+[A-Za-z][A-Za-z0-9_]*[ \t]*\([^;]*\)[ \t]*\{?$/ && line !~ /^(if|for|while|switch)[ \t]*\(/ && line !~ /^static[ \t]/
+      return 0
+    }
+    NR == 1 && /^#!/ { next }
+    !module_checked && /^[[:space:]]*$/ { next }
+    !module_checked {
+      module_doc = is_doc($0)
+      module_checked = 1
+    }
+    is_doc($0) { pending_doc = 1; next }
+    /^[[:space:]]*$/ { next }
+    is_symbol($0) {
+      covered = module_doc || pending_doc
+      printf "%s\t%d\t%s\t%d\n", file, NR, name_from($0), covered
+      pending_doc = 0
+      next
+    }
+    { pending_doc = 0 }
+  ' "$file" >> "$tmp_report"
+done < <(find_files "${roots[@]}")
+
+while IFS=$'\t' read -r file line name covered; do
+  [[ -n "${file:-}" ]] || continue
+  total=$((total + 1))
+  if [[ "$covered" == "1" ]]; then
+    documented=$((documented + 1))
+  fi
+done < "$tmp_report"
+
+if (( total == 0 )); then
+  percent="100.00"
+else
+  percent="$(awk -v documented="$documented" -v total="$total" 'BEGIN { printf "%.2f", documented * 100 / total }')"
+fi
+
+missing=$((total - documented))
+passed=0
+awk -v percent="$percent" -v threshold="$threshold" 'BEGIN { exit percent + 0 >= threshold + 0 ? 0 : 1 }' && passed=1
+
+print_missing_human() {
+  awk -F '\t' '$4 != 1 { printf "- %s:%s %s\n", $1, $2, $3 }' "$tmp_report"
+}
+
+render_human() {
+  if (( passed )); then
+    printf "✔︎ 100%% docstring coverage\n"
+    return
+  fi
+
+  printf "✘ Docstring coverage: %s%% (%d/%d documented)\n" "$percent" "$documented" "$total"
+  if (( explain )) && (( ! summary )); then
+    printf "\nMissing docstrings:\n"
+    print_missing_human
+  fi
+}
+
+render_compact() {
+  if (( passed )); then
+    printf "ok docstrings %s%% %d/%d\n" "$percent" "$documented" "$total"
+  else
+    printf "fail docstrings %s%% %d/%d missing=%d\n" "$percent" "$documented" "$total" "$missing"
+  fi
+}
+
+render_markdown() {
+  if (( passed )); then
+    printf "✔︎ 100%% docstring coverage\n"
+    return
+  fi
+
+  printf "### Docstring Coverage\n\n"
+  printf "- Status: fail\n"
+  printf "- Coverage: %s%%\n" "$percent"
+  printf "- Documented symbols: %d/%d\n" "$documented" "$total"
+  printf "- Missing docstrings: %d\n" "$missing"
+  if (( explain )) && (( ! summary )); then
+    printf "\n#### Missing Docstrings\n\n"
+    awk -F '\t' '$4 != 1 { printf "- `%s:%s` `%s`\n", $1, $2, $3 }' "$tmp_report"
+  fi
+}
+
+render_json() {
+  printf '{"status":"%s","passed":%s,"coverage":%s,"documented":%d,"total":%d,"missing":%d' \
+    "$([[ "$passed" == "1" ]] && printf pass || printf fail)" \
+    "$([[ "$passed" == "1" ]] && printf true || printf false)" \
+    "$percent" "$documented" "$total" "$missing"
+
+  if (( explain )) && (( ! summary )); then
+    printf ',"findings":['
+    local first=1
+    while IFS=$'\t' read -r file line name covered; do
+      [[ "$covered" == "1" ]] && continue
+      (( first )) || printf ','
+      first=0
+      printf '{"file":"%s","line":%d,"symbol":"%s"}' \
+        "$(json_escape "$file")" "$line" "$(json_escape "$name")"
+    done < "$tmp_report"
+    printf ']'
+  fi
+
+  printf '}\n'
+}
+
+render_sarif() {
+  printf '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"tool":{"driver":{"name":"scribe","rules":[{"id":"missing-docstring","shortDescription":{"text":"Missing public symbol documentation"}}]}},"results":['
+  local first=1
+  if (( ! passed )); then
+    while IFS=$'\t' read -r file line name covered; do
+      [[ "$covered" == "1" ]] && continue
+      (( first )) || printf ','
+      first=0
+      printf '{"ruleId":"missing-docstring","level":"warning","message":{"text":"Missing docstring for %s"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"%s"},"region":{"startLine":%d}}}]}' \
+        "$(json_escape "$name")" "$(json_escape "$file")" "$line"
+    done < "$tmp_report"
+  fi
+  printf ']}]}\n'
+}
+
+render_codeclimate() {
+  printf '['
+  local first=1
+  if (( ! passed )); then
+    while IFS=$'\t' read -r file line name covered; do
+      [[ "$covered" == "1" ]] && continue
+      (( first )) || printf ','
+      first=0
+      local fingerprint
+      fingerprint="$(printf '%s:%s:%s' "$file" "$line" "$name" | shasum | awk '{print $1}')"
+      printf '{"type":"issue","check_name":"missing-docstring","description":"Missing docstring for %s","categories":["Style"],"location":{"path":"%s","lines":{"begin":%d,"end":%d}},"fingerprint":"%s","severity":"minor"}' \
+        "$(json_escape "$name")" "$(json_escape "$file")" "$line" "$line" "$fingerprint"
+    done < "$tmp_report"
+  fi
+  printf ']\n'
+}
+
+render_badge() {
+  local color="brightgreen"
+  (( passed )) || color="red"
+  printf '{"schemaVersion":1,"label":"docstrings","message":"%s%%","color":"%s"}\n' "$percent" "$color"
+}
+
+if [[ -n "$sarif_file" ]]; then
+  render_sarif > "$sarif_file"
+fi
+
+case "$format" in
+  human)
+    render_human
+    ;;
+  compact)
+    render_compact
+    ;;
+  markdown)
+    render_markdown
+    ;;
+  json)
+    render_json
+    ;;
+  sarif)
+    render_sarif
+    ;;
+  codeclimate)
+    render_codeclimate
+    ;;
+  badge)
+    render_badge
+    ;;
+  *)
+    printf "scribe: unknown format: %s\n" "$format" >&2
+    exit 2
+    ;;
+esac
+
+(( passed )) && exit 0
+exit 1

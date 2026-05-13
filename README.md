@@ -1,6 +1,6 @@
 # freview 🔎
 
-**One command. Five reviews. Zero mystery meat before push.**
+**One command. Five reviews. Bundled Scribe. Zero mystery meat before push.**
 
 `freview` is the tiny pre-push review harness we use to keep JavaScript/TypeScript projects from faceplanting on `main`. It runs the local Fallow + Scribe review stack, writes a durable `REVIEW.md`, and only prints the full report when something actually needs attention.
 
@@ -21,8 +21,10 @@ Output lands in `REVIEW.md` at the repo root.
 ## Install
 
 ```bash
+mkdir -p ~/bin
 curl -fsSL https://raw.githubusercontent.com/HurleyUS/freview/main/bin/freview -o ~/bin/freview
-chmod +x ~/bin/freview
+curl -fsSL https://raw.githubusercontent.com/HurleyUS/freview/main/bin/scribe -o ~/bin/scribe
+chmod +x ~/bin/freview ~/bin/scribe
 ```
 
 Or clone it:
@@ -30,7 +32,24 @@ Or clone it:
 ```bash
 git clone git@github.com:HurleyUS/freview.git
 ln -sf "$PWD/freview/bin/freview" ~/bin/freview
+ln -sf "$PWD/freview/bin/scribe" ~/bin/scribe
 ```
+
+
+## Package install
+
+This repo ships both binaries:
+
+```bash
+bunx github:HurleyUS/freview --help
+# or from a checkout
+bun link
+```
+
+Package bins:
+
+- `freview` — orchestrates Fallow + bundled Scribe into `REVIEW.md`
+- `scribe` — docstring coverage auditor used by `freview`
 
 ## Usage
 
@@ -83,7 +102,8 @@ chmod +x .git/hooks/pre-push
 - macOS/Linux shell with `zsh`
 - [Bun](https://bun.sh/)
 - `fallow` available through `bunx --bun fallow`
-- `scribe` available on `PATH`
+
+`scribe` is bundled in this package and invoked from `bin/scribe`, so installs do not depend on Michael's local `~/bin/scribe`.
 
 `freview` will run `fallow init --quiet` and `fallow setup-hooks --quiet` before reviewing so the target project has the expected local Fallow scaffolding.
 

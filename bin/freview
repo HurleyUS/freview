@@ -74,6 +74,13 @@ while (( $# > 0 )); do
 done
 
 review_file="$root/REVIEW.md"
+script_dir="${0:A:h}"
+scribe_bin="$script_dir/scribe"
+
+if [[ ! -x "$scribe_bin" ]]; then
+  printf "freview: bundled scribe not found or not executable: %s\n" "$scribe_bin" >&2
+  exit 1
+fi
 
 fallow_args=("--root" "$root" "--format" "$format")
 scribe_args=("--root" "$root" "--format" "$format")
@@ -121,7 +128,7 @@ append_section "HEALTH" bunx --bun fallow "${fallow_args[@]}" health --complexit
 append_section "AUDIT" bunx --bun fallow "${fallow_args[@]}" audit || overall_status=1
 append_section "DEAD" bunx --bun fallow "${fallow_args[@]}" dead-code || overall_status=1
 append_section "DUPLICATION" bunx --bun fallow "${fallow_args[@]}" dupes || overall_status=1
-append_section "DOCSTRINGS" scribe "${scribe_args[@]}" || overall_status=1
+append_section "DOCSTRINGS" "$scribe_bin" "${scribe_args[@]}" || overall_status=1
 
 cp "$report_tmp" "$review_file"
 
@@ -142,7 +149,7 @@ if (( overall_status != 0 )); then
     append_section "AUDIT" bunx --bun fallow "${human_fallow_args[@]}" audit
     append_section "DEAD" bunx --bun fallow "${human_fallow_args[@]}" dead-code
     append_section "DUPLICATION" bunx --bun fallow "${human_fallow_args[@]}" dupes
-    append_section "DOCSTRINGS" scribe "${human_scribe_args[@]}"
+    append_section "DOCSTRINGS" "$scribe_bin" "${human_scribe_args[@]}"
     cat "$human_tmp"
   fi
 fi

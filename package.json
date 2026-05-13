@@ -1,0 +1,27 @@
+{
+  "name": "@hurleyus/freview",
+  "version": "0.1.0",
+  "description": "Pre-push Fallow + bundled Scribe review harness for shipping cleaner projects.",
+  "license": "MIT",
+  "bin": {
+    "freview": "bin/freview",
+    "scribe": "bin/scribe"
+  },
+  "files": [
+    "bin/freview",
+    "bin/scribe",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HurleyUS/freview.git"
+  },
+  "keywords": [
+    "fallow",
+    "scribe",
+    "review",
+    "pre-push",
+    "quality"
+  ]
+}
