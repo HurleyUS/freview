@@ -1,0 +1,150 @@
+#!/usr/bin/env zsh
+## Fallow review public module surface.
+
+set -u
+
+root="."
+format="markdown"
+quiet=0
+explain=0
+summary=0
+ci=0
+fail_on_issues=0
+
+usage() {
+  cat <<'HELP'
+Usage: freview [--quiet] [--explain] [--summary] [--format FORMAT] [--root ROOT]
+
+Runs the local review suite and writes REVIEW.md without printing it back through
+bat. If any section fails, freview exits 1 and prints the report to stdout.
+
+Forwarded shared flags:
+  -r/--root, -f/--format/--output, -q/--quiet, --explain, --summary,
+  --ci, --fail-on-issues
+HELP
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    -r|--root)
+      root="${2:-.}"
+      shift 2
+      ;;
+    -f|--format|--output)
+      format="${2:-markdown}"
+      shift 2
+      ;;
+    --format=*|--output=*)
+      format="${1#*=}"
+      shift
+      ;;
+    -q|--quiet)
+      quiet=1
+      shift
+      ;;
+    --explain)
+      explain=1
+      shift
+      ;;
+    --summary)
+      summary=1
+      shift
+      ;;
+    --ci)
+      ci=1
+      quiet=1
+      format="sarif"
+      fail_on_issues=1
+      shift
+      ;;
+    --fail-on-issues)
+      fail_on_issues=1
+      shift
+      ;;
+    -h|--help|--usage)
+      usage
+      exit 0
+      ;;
+    *)
+      printf "freview: unknown argument: %s\n" "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+review_file="$root/REVIEW.md"
+
+fallow_args=("--root" "$root" "--format" "$format")
+scribe_args=("--root" "$root" "--format" "$format")
+(( quiet )) && fallow_args+=("--quiet") && scribe_args+=("--quiet")
+(( explain )) && fallow_args+=("--explain") && scribe_args+=("--explain")
+(( summary )) && fallow_args+=("--summary") && scribe_args+=("--summary")
+(( ci )) && fallow_args+=("--ci") && scribe_args+=("--ci")
+(( fail_on_issues )) && fallow_args+=("--fail-on-issues") && scribe_args+=("--fail-on-issues")
+
+section_tmp="$(mktemp)"
+report_tmp="$(mktemp)"
+current_report="$report_tmp"
+trap 'rm -f "$section_tmp" "$report_tmp"' EXIT
+
+append_section() {
+  local title="$1"
+  shift
+  : > "$section_tmp"
+
+  "$@" > "$section_tmp" 2>&1
+  local section_status=$?
+
+  if [[ -s "$section_tmp" || "$section_status" -ne 0 ]]; then
+    {
+      printf "\n## %s\n\n" "$title"
+      cat "$section_tmp"
+      printf "\n"
+    } >> "$current_report"
+  fi
+
+  return "$section_status"
+}
+
+overall_status=0
+
+(
+  cd "$root" || exit 1
+  bunx --bun fallow init --quiet > /dev/null 2>&1
+  bunx --bun fallow setup-hooks --quiet > /dev/null 2>&1
+)
+
+printf "# FALLOW REVIEW\n" > "$report_tmp"
+
+append_section "HEALTH" bunx --bun fallow "${fallow_args[@]}" health --complexity || overall_status=1
+append_section "AUDIT" bunx --bun fallow "${fallow_args[@]}" audit || overall_status=1
+append_section "DEAD" bunx --bun fallow "${fallow_args[@]}" dead-code || overall_status=1
+append_section "DUPLICATION" bunx --bun fallow "${fallow_args[@]}" dupes || overall_status=1
+append_section "DOCSTRINGS" scribe "${scribe_args[@]}" || overall_status=1
+
+cp "$report_tmp" "$review_file"
+
+if (( overall_status != 0 )); then
+  if [[ "$format" == "human" ]]; then
+    cat "$report_tmp"
+  else
+    human_tmp="$(mktemp)"
+    trap 'rm -f "$section_tmp" "$report_tmp" "$human_tmp"' EXIT
+    current_report="$human_tmp"
+    printf "# FALLOW REVIEW\n" > "$human_tmp"
+    human_fallow_args=("--root" "$root" "--format" "human")
+    human_scribe_args=("--root" "$root" "--format" "human")
+    (( explain )) && human_fallow_args+=("--explain") && human_scribe_args+=("--explain")
+    (( summary )) && human_fallow_args+=("--summary") && human_scribe_args+=("--summary")
+
+    append_section "HEALTH" bunx --bun fallow "${human_fallow_args[@]}" health --complexity
+    append_section "AUDIT" bunx --bun fallow "${human_fallow_args[@]}" audit
+    append_section "DEAD" bunx --bun fallow "${human_fallow_args[@]}" dead-code
+    append_section "DUPLICATION" bunx --bun fallow "${human_fallow_args[@]}" dupes
+    append_section "DOCSTRINGS" scribe "${human_scribe_args[@]}"
+    cat "$human_tmp"
+  fi
+fi
+
+exit "$overall_status"
