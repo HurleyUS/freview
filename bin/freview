@@ -125,27 +125,21 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 package_path = root / "package.json"
 vercel_path = root / ".vercel" / "project.json"
-
-if not package_path.exists() or not vercel_path.exists():
-    sys.exit(0)
-
-try:
-    package = json.loads(package_path.read_text())
-except Exception as exc:
-    print(f"FAIL: package.json is unreadable: {exc}")
-    sys.exit(1)
-
+package = {}
 deps = {}
-for key in ("dependencies", "devDependencies", "optionalDependencies"):
-    value = package.get(key)
-    if isinstance(value, dict):
-        deps.update(value)
+if package_path.exists():
+    try:
+        package = json.loads(package_path.read_text())
+    except Exception as exc:
+        print(f"FAIL: package.json is unreadable: {exc}")
+        sys.exit(1)
+    for key in ("dependencies", "devDependencies", "optionalDependencies"):
+        value = package.get(key)
+        if isinstance(value, dict):
+            deps.update(value)
 
-if "next" not in deps:
-    sys.exit(0)
-
-skip_dirs = {".git", ".next", ".vercel", "node_modules", "dist", "build", "coverage", ".turbo"}
-suffixes = {".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cjs", ".json"}
+skip_dirs = {".git", ".next", ".vercel", "node_modules", "dist", "build", "coverage", ".turbo", "DerivedData", ".expo"}
+suffixes = {".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cjs", ".json", ".swift", ".kt", ".java", ".m", ".mm", ".plist", ".gradle", ".kts", ".rb"}
 texts = []
 for path in root.rglob("*"):
     if any(part in skip_dirs for part in path.parts):
@@ -158,37 +152,95 @@ for path in root.rglob("*"):
         pass
 
 blob = "\n".join(text for _, text in texts)
-failures = []
+files = {rel for rel, _ in texts}
 
 def has_file(name):
-    return any(rel == name or rel.endswith("/" + name) for rel, _ in texts)
+    return any(rel == name or rel.endswith("/" + name) for rel in files)
 
-if "@sentry/nextjs" not in deps:
-    failures.append("missing @sentry/nextjs dependency")
-if "posthog-js" not in deps:
-    failures.append("missing posthog-js dependency")
-if "withSentryConfig" not in blob:
-    failures.append("missing Sentry Next.js wrapper: withSentryConfig in next.config.*")
-if not (has_file("instrumentation.ts") or has_file("instrumentation.js") or has_file("sentry.server.config.ts") or has_file("sentry.server.config.js")):
-    failures.append("missing server-side Sentry instrumentation")
-if not (has_file("instrumentation-client.ts") or has_file("instrumentation-client.js") or has_file("sentry.client.config.ts") or has_file("sentry.client.config.js")):
-    failures.append("missing client-side Sentry instrumentation")
-if "posthog.init" not in blob:
-    failures.append("missing PostHog browser initialization: posthog.init")
-if not ("PostHogProvider" in blob or "posthog-js/react" in blob):
-    failures.append("missing PostHog React provider")
-if "NEXT_PUBLIC_POSTHOG_KEY" not in blob:
-    failures.append("missing NEXT_PUBLIC_POSTHOG_KEY usage")
-if "NEXT_PUBLIC_POSTHOG_HOST" not in blob:
-    failures.append("missing NEXT_PUBLIC_POSTHOG_HOST usage")
+def has_any(*needles):
+    return any(needle in blob for needle in needles)
+
+platforms = []
+if "next" in deps or has_file("next.config.ts") or has_file("next.config.js") or has_file("next.config.mjs"):
+    platforms.append("next")
+if "react-native" in deps or "expo" in deps or has_file("app.json") or has_file("app.config.ts") or has_file("app.config.js"):
+    platforms.append("react-native")
+if "electron" in deps or "electron-builder" in deps or "electron-vite" in deps:
+    platforms.append("electron")
+if has_file("Package.swift") or has_file("Podfile") or any(rel.endswith(".xcodeproj/project.pbxproj") for rel in files):
+    platforms.append("swift")
+if not platforms:
+    # Unknown/non-app repo: do not block library/tooling packages.
+    sys.exit(0)
+
+failures = []
+
+# Platform-aware package checks.
+if "next" in platforms:
+    if "@sentry/nextjs" not in deps:
+        failures.append("Next.js: missing @sentry/nextjs dependency")
+    if "posthog-js" not in deps:
+        failures.append("Next.js: missing posthog-js dependency")
+    if "withSentryConfig" not in blob:
+        failures.append("Next.js: missing Sentry wrapper withSentryConfig in next.config.*")
+    if not (has_file("instrumentation.ts") or has_file("instrumentation.js") or has_file("sentry.server.config.ts") or has_file("sentry.server.config.js")):
+        failures.append("Next.js: missing server-side Sentry instrumentation")
+    if not (has_file("instrumentation-client.ts") or has_file("instrumentation-client.js") or has_file("sentry.client.config.ts") or has_file("sentry.client.config.js")):
+        failures.append("Next.js: missing client-side Sentry instrumentation")
+    if not has_any("posthog.init"):
+        failures.append("Next.js: missing PostHog browser initialization: posthog.init")
+    if not has_any("PostHogProvider", "posthog-js/react"):
+        failures.append("Next.js: missing PostHog React provider")
+
+if "react-native" in platforms:
+    if not any(dep in deps for dep in ("@sentry/react-native", "sentry-expo")):
+        failures.append("React Native/Expo: missing @sentry/react-native or sentry-expo dependency")
+    if not any(dep in deps for dep in ("posthog-react-native", "posthog-js")):
+        failures.append("React Native/Expo: missing posthog-react-native dependency")
+    if not has_any("Sentry.init", "SentryReactNative.init"):
+        failures.append("React Native/Expo: missing Sentry.init")
+    if not has_any("PostHogProvider", "new PostHog", "posthog.init"):
+        failures.append("React Native/Expo: missing PostHog initialization/provider")
+
+if "electron" in platforms:
+    if not any(dep in deps for dep in ("@sentry/electron", "@sentry/node")):
+        failures.append("Electron: missing @sentry/electron dependency")
+    if not any(dep in deps for dep in ("posthog-js", "posthog-node")):
+        failures.append("Electron: missing PostHog dependency")
+    if not has_any("Sentry.init"):
+        failures.append("Electron: missing Sentry.init")
+    if not has_any("posthog.init", "new PostHog", "PostHog"):
+        failures.append("Electron: missing PostHog initialization")
+
+if "swift" in platforms:
+    if not has_any("Sentry", "sentry-cocoa", "SentrySDK", "https://github.com/getsentry/sentry-cocoa"):
+        failures.append("Swift/iOS: missing Sentry SDK dependency or import")
+    if not has_any("PostHog", "posthog-ios", "https://github.com/PostHog/posthog-ios"):
+        failures.append("Swift/iOS: missing PostHog SDK dependency or import")
+    if not has_any("SentrySDK.start", "SentrySDK"):
+        failures.append("Swift/iOS: missing SentrySDK.start")
+    if not has_any("PostHogSDK.shared.setup", "PostHogConfig", "PostHogSDK"):
+        failures.append("Swift/iOS: missing PostHog setup")
+
+# Cross-platform env/key usage checks. Prefixes vary by framework, but the signal should exist in code/config.
+sentry_env_signals = ("SENTRY_DSN", "NEXT_PUBLIC_SENTRY_DSN", "EXPO_PUBLIC_SENTRY_DSN", "VITE_SENTRY_DSN", "SENTRY_AUTH_TOKEN")
+posthog_key_signals = ("POSTHOG_KEY", "NEXT_PUBLIC_POSTHOG_KEY", "EXPO_PUBLIC_POSTHOG_KEY", "VITE_POSTHOG_KEY")
+posthog_host_signals = ("POSTHOG_HOST", "NEXT_PUBLIC_POSTHOG_HOST", "EXPO_PUBLIC_POSTHOG_HOST", "VITE_POSTHOG_HOST")
+if not has_any(*sentry_env_signals):
+    failures.append("missing Sentry DSN/auth env usage")
+if not has_any(*posthog_key_signals):
+    failures.append("missing PostHog key env usage")
+if not has_any(*posthog_host_signals):
+    failures.append("missing PostHog host env usage")
 
 if failures:
     print("FAIL: observability coverage gate failed")
+    print(f"Detected platforms: {', '.join(platforms)}")
     for failure in failures:
         print(f"- {failure}")
     sys.exit(1)
 
-print("PASS: static Sentry/PostHog coverage checks")
+print(f"PASS: static Sentry/PostHog coverage checks ({', '.join(platforms)})")
 PYOBS
   local static_status=$?
   (( static_status != 0 )) && return "$static_status"
@@ -223,15 +275,15 @@ for line in sys.stdin.read().splitlines():
     if not stripped or stripped.startswith(("Vercel CLI", "Retrieving", ">", "name ")):
         continue
     first = stripped.split()[0]
-    if first.isidentifier() or first.startswith("NEXT_PUBLIC_"):
+    if first.isidentifier() or first.startswith(("NEXT_PUBLIC_", "EXPO_PUBLIC_", "VITE_")):
         names.add(first)
 required = [
-    ("Sentry DSN", ("NEXT_PUBLIC_SENTRY_DSN", "SENTRY_DSN")),
+    ("Sentry DSN", ("NEXT_PUBLIC_SENTRY_DSN", "SENTRY_DSN", "EXPO_PUBLIC_SENTRY_DSN", "VITE_SENTRY_DSN")),
     ("SENTRY_AUTH_TOKEN", ("SENTRY_AUTH_TOKEN",)),
     ("SENTRY_ORG", ("SENTRY_ORG",)),
     ("SENTRY_PROJECT", ("SENTRY_PROJECT",)),
-    ("NEXT_PUBLIC_POSTHOG_KEY", ("NEXT_PUBLIC_POSTHOG_KEY",)),
-    ("NEXT_PUBLIC_POSTHOG_HOST", ("NEXT_PUBLIC_POSTHOG_HOST",)),
+    ("PostHog key", ("NEXT_PUBLIC_POSTHOG_KEY", "POSTHOG_KEY", "EXPO_PUBLIC_POSTHOG_KEY", "VITE_POSTHOG_KEY")),
+    ("PostHog host", ("NEXT_PUBLIC_POSTHOG_HOST", "POSTHOG_HOST", "EXPO_PUBLIC_POSTHOG_HOST", "VITE_POSTHOG_HOST")),
 ]
 missing = [label for label, options in required if not any(option in names for option in options)]
 if missing:
