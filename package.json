@@ -23,5 +23,10 @@
     "review",
     "pre-push",
     "quality"
-  ]
+  ],
+  "scripts": {
+    "format": "bunx --bun prettier --write . --ignore-path .gitignore",
+    "lint": "bash -n bin/*",
+    "check": "true"
+  }
 }
