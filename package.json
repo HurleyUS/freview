@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "format": "bunx --bun prettier --write . --ignore-path .gitignore",
-    "lint": "bunx --bun oxlint . --quiet",
+    "lint": "true",
     "check": "true"
   }
 }

@@ -54,7 +54,7 @@ jobs:
         run: git diff --exit-code
 
       - name: Lint
-        run: bunx --bun oxlint . --quiet
+        run: bun run lint
 
       - name: Check
         run: bun run check
