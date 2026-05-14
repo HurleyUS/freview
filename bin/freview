@@ -95,6 +95,25 @@ report_tmp="$(mktemp)"
 current_report="$report_tmp"
 trap 'rm -f "$section_tmp" "$report_tmp"' EXIT
 
+section_has_sarif_results() {
+  python3 - "$section_tmp" <<'PYSARIF'
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text())
+except Exception:
+    sys.exit(1)
+
+for run in payload.get("runs", []):
+    if run.get("results"):
+        sys.exit(0)
+
+sys.exit(1)
+PYSARIF
+}
+
 append_section() {
   local title="$1"
   shift
@@ -102,6 +121,13 @@ append_section() {
 
   "$@" > "$section_tmp" 2>&1
   local section_status=$?
+
+  # Some Fallow SARIF commands can exit non-zero even when they produced a
+  # valid report with zero results. Keep the gate blocking real findings, but
+  # don't fail empty SARIF output.
+  if (( section_status != 0 )) && [[ "$format" == "sarif" ]] && ! section_has_sarif_results; then
+    section_status=0
+  fi
 
   if [[ -s "$section_tmp" || "$section_status" -ne 0 ]]; then
     {
