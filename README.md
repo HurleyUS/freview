@@ -35,7 +35,6 @@ ln -sf "$PWD/freview/bin/freview" ~/bin/freview
 ln -sf "$PWD/freview/bin/scribe" ~/bin/scribe
 ```
 
-
 ## Package install
 
 This repo ships both binaries:
@@ -62,15 +61,15 @@ freview --ci
 
 ### Flags
 
-| Flag | Purpose |
-| --- | --- |
-| `-r, --root <path>` | Review another project root |
-| `-f, --format <format>` | Forward output format to Fallow/Scribe |
-| `-q, --quiet` | Reduce command chatter |
-| `--summary` | Request summary output from underlying tools |
-| `--explain` | Include explanatory findings |
-| `--ci` | SARIF-oriented CI mode, quiet + fail-on-issues |
-| `--fail-on-issues` | Return non-zero when findings exist |
+| Flag                    | Purpose                                        |
+| ----------------------- | ---------------------------------------------- |
+| `-r, --root <path>`     | Review another project root                    |
+| `-f, --format <format>` | Forward output format to Fallow/Scribe         |
+| `-q, --quiet`           | Reduce command chatter                         |
+| `--summary`             | Request summary output from underlying tools   |
+| `--explain`             | Include explanatory findings                   |
+| `--ci`                  | SARIF-oriented CI mode, quiet + fail-on-issues |
+| `--fail-on-issues`      | Return non-zero when findings exist            |
 
 ## Pre-push hook
 
