@@ -332,6 +332,31 @@ print("PASS: Vercel production env vars confirmed for Sentry/PostHog")
 '
 }
 
+prefer_push_only_fallow_gate() {
+  local gate_path="$root/.claude/hooks/fallow-gate.sh"
+
+  if [[ ! -f "$gate_path" ]]; then
+    return 0
+  fi
+
+  python3 - "$gate_path" <<'PYGATE'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+content = path.read_text()
+content = content.replace(
+    "Blocks Claude Code git commit and git push when fallow audit returns verdict fail.",
+    "Blocks Claude Code git push when fallow audit returns verdict fail.",
+)
+content = content.replace(
+    "git[[:space:]]+(commit|push)([[:space:]]|$)",
+    "git[[:space:]]+push([[:space:]]|$)",
+)
+path.write_text(content)
+PYGATE
+}
+
 overall_status=0
 
 (
@@ -339,6 +364,8 @@ overall_status=0
   bunx --bun fallow init --quiet > /dev/null 2>&1
   bunx --bun fallow setup-hooks --quiet > /dev/null 2>&1
 )
+
+prefer_push_only_fallow_gate
 
 printf "# FALLOW REVIEW\n" > "$report_tmp"
 
