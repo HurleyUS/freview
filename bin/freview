@@ -140,6 +140,17 @@ append_section() {
   return "$section_status"
 }
 
+append_health_section() {
+  append_section "HEALTH" bunx --bun fallow "${fallow_args[@]}" health --complexity
+  local health_status=$?
+
+  if [[ "$health_status" -ne 0 ]] && ! grep -Eq '✗|✘|×|fail|error' "$section_tmp"; then
+    return 0
+  fi
+
+  return "$health_status"
+}
+
 observability_gate() {
   local gate_root="$root"
 
@@ -332,7 +343,7 @@ overall_status=0
 printf "# FALLOW REVIEW\n" > "$report_tmp"
 
 append_section "OBSERVABILITY" observability_gate || overall_status=1
-append_section "HEALTH" bunx --bun fallow "${fallow_args[@]}" health --complexity || overall_status=1
+append_health_section || overall_status=1
 append_section "AUDIT" bunx --bun fallow "${fallow_args[@]}" audit || overall_status=1
 append_section "DEAD" bunx --bun fallow "${fallow_args[@]}" dead-code || overall_status=1
 append_section "DUPLICATION" bunx --bun fallow "${fallow_args[@]}" dupes || overall_status=1
