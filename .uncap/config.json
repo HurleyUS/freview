@@ -1,0 +1,19 @@
+{
+  "repoId": "r176909y9e9tf7rwzay6wsannh87nhf6",
+  "owner": "uncap_user",
+  "name": "freview",
+  "originType": "native",
+  "legacy": {
+    "hasGitHub": true,
+    "hasGit": true
+  },
+  "defaults": {
+    "file": "public",
+    "fragment": "public",
+    "issue": "public",
+    "pullRequest": "public",
+    "branch": "public",
+    "comment": "public"
+  },
+  "headSha": ""
+}
