@@ -50,6 +50,10 @@ Package bins:
 - `freview` — orchestrates Fallow + bundled Scribe into `REVIEW.md`
 - `scribe` — docstring coverage auditor used by `freview`
 
+Scribe recognizes module docblocks after a leading single-line `/* eslint-disable */`
+directive, including Convex-generated API files. The directive itself provides no
+documentation; exports without a module or nearby symbol docblock still fail.
+
 ## Usage
 
 ```bash

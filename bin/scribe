@@ -305,6 +305,7 @@ has_module_doc() {
   awk '
     BEGIN { seen_shebang = 0 }
     NR == 1 && /^#!/ { next }
+    /^[[:space:]]*\/\* eslint-disable[^*]*\*\/[[:space:]]*$/ { next }
     /^[[:space:]]*$/ { next }
     /^[[:space:]]*(\/\*\*|\/\/\/|\/\/!|##|#|""")/ { exit 0 }
     index($0, sprintf("%c%c%c", 39, 39, 39)) == 1 { exit 0 }
@@ -382,6 +383,7 @@ while IFS= read -r file; do
       return 0
     }
     NR == 1 && /^#!/ { next }
+    !module_checked && /^[[:space:]]*\/\* eslint-disable[^*]*\*\/[[:space:]]*$/ { next }
     !module_checked && /^[[:space:]]*$/ { next }
     !module_checked {
       module_doc = is_doc($0)

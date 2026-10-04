@@ -27,6 +27,6 @@
   "scripts": {
     "format": "bunx --bun prettier --write . --ignore-path .gitignore",
     "lint": "true",
-    "check": "true"
+    "check": "bun test && zsh -n bin/freview && zsh -n bin/scribe"
   }
 }
