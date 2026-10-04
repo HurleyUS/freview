@@ -27,6 +27,7 @@ function audit(source) {
     ],
     { encoding: "utf8" },
   );
+  if (result.error) throw result.error;
   return { exit: result.status, report: JSON.parse(result.stdout) };
 }
 
